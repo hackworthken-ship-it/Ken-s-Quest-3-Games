@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Bulldozer Champagne Balance</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background-color: #000;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      color: white;
+    }
+    #overlay {
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(15, 20, 25, 0.9);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      text-align: center;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+    h1 { margin-bottom: 10px; color: #f39c12; }
+    p { max-width: 600px; line-height: 1.5; margin-bottom: 20px; }
+    .hidden { display: none !important; }
+    #vr-button-container { margin-top: 20px; }
+  </style>
+  <!-- Import maps polyfill -->
+  <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+
+  <div id="overlay">
+    <h1>Bulldozer Champagne Balance</h1>
+    <p>
+      <strong>VR Controls:</strong> Trigger (pointed at ground) to set a drive target. Grip to teleport your viewpoint. A/X to fire the bubble blaster.<br><br>
+      <strong>Desktop Controls:</strong> Left-click ground to drive. Right-click to teleport. Drag sliders to tune. Spacebar to blast bubbles. Drag to rotate camera.<br><br>
+      Keep the champagne glass balanced using classical PID tuning or train the AI controller!
+    </p>
+    <div id="vr-button-container"></div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { VRButton } from 'three/addons/webxr/VRButton.js';
+    import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // --- 1. CORE SETUP ---
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const clock = new THREE.Clock();
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87CEEB);
+    scene.fog = new THREE.FogExp2(0x87CEEB, 0.02);
+
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+    const cameraRig = new THREE.Group();
+    cameraRig.position.set(0, 1.6, 15);
+    cameraRig.add(camera);
+    scene.add(cameraRig);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.xr.enabled = true;
+    container.appendChild(renderer.domElement);
+
+    const overlay = document.getElementById('overlay');
+    const vrButtonContainer = document.getElementById('vr-button-container');
+    vrButtonContainer.appendChild(VRButton.createButton(renderer));
+
+    renderer.xr.addEventListener('sessionstart', () => { overlay.classList.add('hidden'); initAudio(); });
+    renderer.xr.addEventListener('sessionend', () => overlay.classList.remove('hidden'));
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.6, 0);
+    controls.update();
+
+    // --- 2. ENVIRONMENT ---
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+    hemiLight.position.set(0, 200, 0);
+    scene.add(hemiLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight.position.set(50, 100, 50);
+    dirLight.castShadow = true;
+    dirLight.shadow.camera.top = 50;
+    dirLight.shadow.camera.bottom = -50;
+    dirLight.shadow.camera.left = -50;
+    dirLight.shadow.camera.right = 50;
+    scene.add(dirLight);
+
+    // Ground
+    const groundGeo = new THREE.PlaneGeometry(500, 500);
+    const groundMat = new THREE.MeshLambertMaterial({ color: 0x4B792F });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Dirt Track
+    const trackGeo = new THREE.PlaneGeometry(100, 4);
+    const trackMat = new THREE.MeshLambertMaterial({ color: 0x3d2817 });
+    const track = new THREE.Mesh(trackGeo, trackMat);
+    track.rotation.x = -Math.PI / 2;
+    track.position.y = 0.01;
+    scene.add(track);
+
+    // Distance Markers
+    for (let i = -40; i <= 40; i += 5) {
+      const markerGeo = new THREE.BoxGeometry(0.2, 0.2, 1);
+      const markerMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
+      const marker = new THREE.Mesh(markerGeo, markerMat);
+      marker.position.set(i, 0.1, 2.5);
+      marker.receiveShadow = true;
+      marker.castShadow = true;
+      scene.add(marker);
+    }
+
+    // --- 3. PROCEDURAL BULLDOZER & GLASS ---
+    const dozerGroup = new THREE.Group();
+    scene.add(dozerGroup);
+
+    // Chassis
+    const yellowMat = new THREE.MeshStandardMaterial({ color: 0xf1c40f, roughness: 0.6 });
+    const blackMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9 });
+    
+    const body = new THREE.Mesh(new THREE.BoxGeometry(4, 1.5, 2.5), yellowMat);
+    body.position.y = 1.25;
+    body.castShadow = true;
+    dozerGroup.add(body);
+
+    const cab = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.5, 2.4), yellowMat);
+    cab.position.set(-0.5, 2.75, 0);
+    cab.castShadow = true;
+    dozerGroup.add(cab);
+
+    // Wheels
+    for(let i=0; i<4; i++) {
+        const w = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 0.6, 16), blackMat);
+        w.rotation.x = Math.PI/2;
+        w.position.set(i<2?-1.2:1.2, 0.8, i%2===0?-1.5:1.5);
+        w.castShadow = true;
+        dozerGroup.add(w);
+    }
+
+    // Glass Rig
+    const pivot = new THREE.Group();
+    pivot.position.set(-0.5, 3.5, 0); // Top of cab
+    dozerGroup.add(pivot);
+
+    const glassMat = new THREE.MeshPhysicalMaterial({
+      color: 0xffffff, transmission: 0.9, opacity: 1, metalness: 0, roughness: 0, 
+      ior: 1.5, thickness: 0.1, doubleSided: true, depthWrite: false
+    });
+    
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1), glassMat);
+    stem.position.y = 0.5;
+    pivot.add(stem);
+
+    const bowlGeo = new THREE.CylinderGeometry(0.8, 0.05, 1.5, 16, 1, true);
+    const bowl = new THREE.Mesh(bowlGeo, glassMat);
+    bowl.position.y = 1.75;
+    pivot.add(bowl);
+
+    const liquidMat = new THREE.MeshPhysicalMaterial({ color: 0xf1c40f, transmission: 0.5, opacity: 0.8 });
+    let liquidFill = 1.0;
+    const maxLiquidHeight = 1.3;
+    const liquid = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.06, maxLiquidHeight, 16), liquidMat);
+    liquid.position.y = 1.75 - (1.5 - maxLiquidHeight)/2;
+    pivot.add(liquid);
+
+    // --- 4. PHYSICS & STATE ---
+    let state = {
+      y: 0, vy: 0, target: 0, mode: 'pid', 
+      Kp: 2.0, Ki: 0.0, Kd: 2.5, Umax: 10, errorSum: 0,
+      aiWeights: Array(10).fill(0).map(()=> (Math.random()-0.5)*2),
+      glassTilt: 0, glassVel: 0, gameOver: false, score: 0
+    };
+
+    const SIM = {
+      wn: 4.0, zeta: 0.2, pendWn: 5.0, pendZeta: 0.05, forceGain: -0.15
+    };
+
+    // AI Controller Pass
+    function aiForward(e, ie, vy, weights) {
+      // Very simple 3 -> 2 hidden -> 1 out
+      const h1 = Math.tanh(e*weights[0] + ie*weights[1] + vy*weights[2] + weights[3]);
+      const h2 = Math.tanh(e*weights[4] + ie*weights[5] + vy*weights[6] + weights[7]);
+      return (h1*weights[8] + h2*weights[9]) * state.Umax;
+    }
+
+    // Evolution Strategy Trainer
+    function trainAI() {
+      uiContext.fillStyle = '#ff0000'; uiContext.fillText("Training...", 50, 50); updateUI();
+      setTimeout(() => {
+        let bestWeights = [...state.aiWeights];
+        let bestCost = Infinity;
+        let sigma = 0.5;
+        
+        for(let gen=0; gen<50; gen++) {
+          for(let pop=0; pop<20; pop++) {
+            let cand = bestWeights.map(w => w + (Math.random()-0.5)*sigma);
+            let cost = simulateRun(cand);
+            if(cost < bestCost) { bestCost = cost; bestWeights = cand; }
+          }
+          sigma *= 0.9;
+        }
+        state.aiWeights = bestWeights;
+        console.log("Training complete. Best cost:", bestCost);
+      }, 50);
+    }
+
+    function simulateRun(weights) {
+      let sy=0, svy=0, se=10, sie=0, cost=0;
+      for(let i=0; i<150; i++) {
+        let u = aiForward(se, sie, svy, weights);
+        u = Math.max(-state.Umax, Math.min(state.Umax, u));
+        let acc = SIM.wn*SIM.wn*(u - sy) - 2*SIM.zeta*SIM.wn*svy;
+        svy += acc * 0.05;
+        sy += svy * 0.05;
+        se = 10 - sy;
+        sie += se * 0.05;
+        cost += (se*se) + (u*u*0.01);
+        if (sy > 11) cost += 1000; // heavy overshoot penalty
+      }
+      return cost;
+    }
+
+    // --- 5. UI DASHBOARD ---
+    const uiCanvas = document.createElement('canvas');
+    uiCanvas.width = 1024; uiCanvas.height = 512;
+    const uiContext = uiCanvas.getContext('2d');
+    const uiTex = new THREE.CanvasTexture(uiCanvas);
+    const uiPlane = new THREE.Mesh(new THREE.PlaneGeometry(8, 4), new THREE.MeshBasicMaterial({ map: uiTex, transparent: true }));
+    uiPlane.position.set(0, 3, -6);
+    scene.add(uiPlane);
+
+    const sliders = [
+      { name: 'Kp', min: 0, max: 10, val: state.Kp, y: 150, update: (v)=>state.Kp=v },
+      { name: 'Kd', min: 0, max: 10, val: state.Kd, y: 250, update: (v)=>state.Kd=v },
+      { name: 'Umax', min: 1, max: 20, val: state.Umax, y: 350, update: (v)=>state.Umax=v }
+    ];
+    let activeSlider = null;
+
+    function updateUI() {
+      uiContext.clearRect(0,0,1024,512);
+      uiContext.fillStyle = 'rgba(20, 20, 30, 0.8)';
+      uiContext.fillRect(0,0,1024,512);
+      uiContext.fillStyle = '#fff';
+      uiContext.font = '36px sans-serif';
+      uiContext.fillText(`Mode: ${state.mode.toUpperCase()} (Click here to toggle)`, 50, 60);
+      uiContext.fillText(`Score: ${state.score}`, 800, 60);
+      
+      // Draw Sliders
+      sliders.forEach(s => {
+        uiContext.fillText(`${s.name}: ${s.val.toFixed(2)}`, 50, s.y - 15);
+        uiContext.fillStyle = '#555';
+        uiContext.fillRect(50, s.y, 400, 20);
+        uiContext.fillStyle = '#f39c12';
+        let knobX = 50 + ((s.val - s.min) / (s.max - s.min)) * 400;
+        uiContext.beginPath();
+        uiContext.arc(knobX, s.y + 10, 20, 0, Math.PI*2);
+        uiContext.fill();
+        uiContext.fillStyle = '#fff';
+      });
+
+      // Draw Train Button
+      uiContext.fillStyle = '#27ae60';
+      uiContext.fillRect(550, 130, 200, 60);
+      uiContext.fillStyle = '#fff';
+      uiContext.fillText("Train AI", 590, 172);
+
+      uiTex.needsUpdate = true;
+    }
+    updateUI();
+
+    // --- 6. INPUT HANDLING (Raycasting) ---
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let isMouseDown = false;
+
+    function handleInteraction(ray, isClick) {
+      // 1. Check UI Intersections
+      const uiIntersects = raycaster.intersectObject(uiPlane);
+      if (uiIntersects.length > 0) {
+        const uv = uiIntersects[0].uv;
+        const cx = uv.x * 1024;
+        const cy = (1 - uv.y) * 512;
+        
+        if (isClick && cy < 100) { state.mode = state.mode === 'pid' ? 'ai' : 'pid'; playBeep(); updateUI(); return; }
+        if (isClick && cx > 550 && cx < 750 && cy > 130 && cy < 190) { trainAI(); playBeep(); return; }
+
+        sliders.forEach(s => {
+          if (cy > s.y - 30 && cy < s.y + 50 && cx < 500) {
+            if (isClick) activeSlider = s;
+            if (activeSlider === s) {
+              let t = (cx - 50) / 400;
+              s.val = Math.max(s.min, Math.min(s.max, s.min + t * (s.max - s.min)));
+              s.update(s.val);
+              updateUI();
+            }
+          }
+        });
+        return;
+      }
+
+      // 2. Check Ground (Drive/Teleport)
+      const groundIntersects = raycaster.intersectObject(ground);
+      if (groundIntersects.length > 0 && isClick && !state.gameOver) {
+        state.target = Math.max(-45, Math.min(45, groundIntersects[0].point.x));
+        playBeep();
+      }
+    }
+
+    window.addEventListener('mousedown', (e) => {
+      isMouseDown = true;
+      mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      if (e.button === 0) handleInteraction(raycaster.ray, true);
+      if (e.button === 2) { 
+        // Teleport
+        const ints = raycaster.intersectObject(ground);
+        if(ints.length > 0) cameraRig.position.set(ints[0].point.x, 1.6, ints[0].point.z + 10);
+      }
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!isMouseDown) return;
+      mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      handleInteraction(raycaster.ray, false);
+    });
+    window.addEventListener('mouseup', () => { isMouseDown = false; activeSlider = null; });
+    window.addEventListener('contextmenu', e => e.preventDefault());
+
+    // VR Controllers
+    let controller1 = renderer.xr.getController(0);
+    controller1.addEventListener('selectstart', () => onSelectStart(controller1));
+    controller1.addEventListener('selectend', onSelectEnd);
+    cameraRig.add(controller1);
+
+    let controller2 = renderer.xr.getController(1);
+    controller2.addEventListener('selectstart', () => onSelectStart(controller2));
+    controller2.addEventListener('selectend', onSelectEnd);
+    cameraRig.add(controller2);
+
+    const controllerModelFactory = new XRControllerModelFactory();
+    cameraRig.add(renderer.xr.getControllerGrip(0).add(controllerModelFactory.createControllerModel(renderer.xr.getControllerGrip(0))));
+    cameraRig.add(renderer.xr.getControllerGrip(1).add(controllerModelFactory.createControllerModel(renderer.xr.getControllerGrip(1))));
+
+    function onSelectStart(controller) {
+      const tempMatrix = new THREE.Matrix4().identity().extractRotation(controller.matrixWorld);
+      raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+      handleInteraction(raycaster.ray, true);
+      if(!audioCtx) initAudio();
+    }
+    function onSelectEnd() { activeSlider = null; }
+
+    // --- 7. AUDIO SYSTEM ---
+    let audioCtx;
+    let engineOsc, engineGain;
+    
+    function initAudio() {
+      if(audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      
+      // Engine sound
+      engineOsc = audioCtx.createOscillator();
+      engineOsc.type = 'sawtooth';
+      engineGain = audioCtx.createGain();
+      engineGain.gain.value = 0.1;
+      
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 150;
+
+      engineOsc.connect(filter);
+      filter.connect(engineGain);
+      engineGain.connect(audioCtx.destination);
+      engineOsc.start();
+
+      // Setup Background Music (Loading directly from GitHub)
+      const bgm = new Audio("Soft Morning Light.mp3");
+      bgm.loop = true;
+      bgm.volume = 0.3;
+      bgm.play().catch(e => console.log("BGM play blocked pending gesture"));
+    }
+
+    function playBeep() {
+      if(!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.frequency.setValueAtTime(600, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.1);
+    }
+
+    function playSpill() {
+      if(!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'square';
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.frequency.setValueAtTime(100, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + 0.5);
+      gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.5);
+    }
+
+    // --- 8. MAIN LOOP ---
+    function render() {
+      const dt = Math.min(clock.getDelta(), 0.1);
+
+      if(!state.gameOver) {
+        // 1. Control Law
+        let e = state.target - state.y;
+        state.errorSum += e * dt;
+        state.errorSum = Math.max(-20, Math.min(20, state.errorSum)); // Anti-windup
+        
+        let u = 0;
+        if(state.mode === 'pid') {
+          u = state.Kp * e + state.Ki * state.errorSum + state.Kd * (-state.vy);
+        } else {
+          u = aiForward(e, state.errorSum, state.vy, state.aiWeights);
+        }
+        u = Math.max(-state.Umax, Math.min(state.Umax, u));
+
+        // 2. Dozer Physics (Plant)
+        let acc = SIM.wn * SIM.wn * (u - state.y) - 2 * SIM.zeta * SIM.wn * state.vy;
+        state.vy += acc * dt;
+        state.y += state.vy * dt;
+        dozerGroup.position.x = state.y;
+
+        // 3. Pendulum Physics (Glass Tilt)
+        let tiltAcc = -SIM.pendWn * SIM.pendWn * state.glassTilt - 2 * SIM.pendZeta * SIM.pendWn * state.glassVel + SIM.forceGain * acc;
+        state.glassVel += tiltAcc * dt;
+        state.glassTilt += state.glassVel * dt;
+        
+        pivot.rotation.z = state.glassTilt;
+        liquid.rotation.z = -state.glassTilt * 0.5; // Counter-slosh
+
+        // Check Spill
+        if (Math.abs(state.glassTilt) > 0.4) {
+          liquidFill -= dt * 0.5;
+          liquid.scale.y = Math.max(0.01, liquidFill);
+          liquid.position.y = 1.75 - (1.5 - (1.5 * liquidFill))/2;
+          
+          if (liquidFill <= 0.1 && !state.gameOver) {
+            state.gameOver = true;
+            playSpill();
+            setTimeout(() => { state.gameOver = false; liquidFill = 1.0; state.glassTilt=0; state.glassVel=0; state.score=0; updateUI(); }, 3000);
+          }
+        } else if (Math.abs(state.vy) < 0.1 && Math.abs(e) < 0.1 && Math.abs(state.glassTilt) < 0.05 && Math.abs(state.y) > 1) {
+            // Settle reward
+            state.score += 10;
+            state.target = 0; // auto return for endless play
+            playBeep();
+            updateUI();
+        }
+
+        // Update Audio
+        if(engineOsc) {
+          engineOsc.frequency.setTargetAtTime(80 + Math.abs(state.vy)*20, audioCtx.currentTime, 0.1);
+          engineGain.gain.setTargetAtTime(0.05 + Math.abs(state.vy)*0.02, audioCtx.currentTime, 0.1);
+        }
+      }
+
+      // Update VR UI Interactions if active
+      if (activeSlider && renderer.xr.isPresenting) {
+        let c = controller1; // simplify to active controller logic
+        const tempMatrix = new THREE.Matrix4().identity().extractRotation(c.matrixWorld);
+        raycaster.ray.origin.setFromMatrixPosition(c.matrixWorld);
+        raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+        handleInteraction(raycaster.ray, false);
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    renderer.setAnimationLoop(render);
+
+  </script>
+</body>
+</html>
